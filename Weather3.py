@@ -1,138 +1,102 @@
-import streamlit as st
 import requests
+import streamlit as st
 import json
 import base64
-from datetime import datetime, timedelta
-from prophet import Prophet
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
+from datetime import datetime
 
-# ========================
-# GITHUB SETTINGS
-# ========================
-GITHUB_TOKEN = st.secrets["github"]["token"]
-REPO_OWNER = st.secrets["github"]["repo_owner"]
-REPO_NAME = st.secrets["github"]["repo_name"]
-REPORTS_FILE = "reports.json"
-
-AUTHORIZED_ADMINS = ["admin1@example.com", "admin2@example.com"]  # <-- change these
-
-
-# ========================
-# GITHUB HELPERS
-# ========================
-def github_headers():
-    return {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-
-def get_reports():
-    """Fetch reports.json from GitHub"""
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{REPORTS_FILE}"
-    response = requests.get(url, headers=github_headers())
-    if response.status_code == 200:
-        content = response.json()
-        data = base64.b64decode(content["content"]).decode("utf-8")
-        return json.loads(data), content["sha"]
-    return [], None
-
-
-def update_reports(reports, sha):
-    """Update reports.json in GitHub"""
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{REPORTS_FILE}"
-    encoded_content = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
-    message = "Update community reports"
-    response = requests.put(url, headers=github_headers(), json={
-        "message": message,
-        "content": encoded_content,
-        "sha": sha
-    })
-    return response.status_code == 200 or response.status_code == 201
-
-
-def save_image_to_github(image_file, filename):
-    """Save uploaded image to GitHub"""
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{filename}"
-    file_bytes = image_file.getvalue()
-    encoded_content = base64.b64encode(file_bytes).decode()
-    response = requests.put(url, headers=github_headers(), json={
-        "message": f"Upload {filename}",
-        "content": encoded_content
-    })
-    if response.status_code in (200, 201):
-        return response.json()["content"]["download_url"]
-    return None
-
-
-# ========================
-# WEATHER & FLOOD PREDICTION
-# ========================
-def get_weather_data(lat, lon):
-    """Fetch historical and forecast weather data from Open-Meteo"""
-    now = datetime.utcnow()
-    past = now - timedelta(days=5)
-    url = (
-        f"https://api.open-meteo.com/v1/forecast?"
-        f"latitude={lat}&longitude={lon}"
-        f"&hourly=temperature_2m,precipitation,rain,showers"
-        f"&start_date={past.strftime('%Y-%m-%d')}"
-        f"&end_date={now.strftime('%Y-%m-%d')}"
-    )
-    return requests.get(url).json()
-
-
-def predict_rainfall(weather_data):
-    """Use Prophet to forecast rainfall"""
-    df = pd.DataFrame({
-        "ds": pd.to_datetime(weather_data["hourly"]["time"]),
-        "y": weather_data["hourly"]["rain"]
-    })
-
-    model = Prophet(daily_seasonality=True)
-    model.fit(df)
-
-    future = model.make_future_dataframe(periods=3, freq="H")
-    forecast = model.predict(future)
-
-    avg_rain = forecast["yhat"].iloc[-3:].mean()
-    if avg_rain > 20:
-        risk = "High"
-    elif avg_rain > 10:
-        risk = "Medium"
-    else:
-        risk = "Low"
-
-    return avg_rain, risk
-
-
-def generate_map(lat, lon, risk):
-    """Generate a Folium map with flood risk marker"""
-    fmap = folium.Map(location=[lat, lon], zoom_start=10)
-    color = "red" if risk == "High" else "orange" if risk == "Medium" else "green"
-    folium.Marker(
-        [lat, lon],
-        popup=f"Flood Risk: {risk}",
-        icon=folium.Icon(color=color)
-    ).add_to(fmap)
-    return fmap
-
-
-# ========================
-# LOGIN SYSTEM
-# ========================
+# ----------------------------
+# Session state for login
+# ----------------------------
 if "role" not in st.session_state:
     st.session_state.role = None
 if "user" not in st.session_state:
     st.session_state.user = None
 
-st.set_page_config(page_title="Weather & Flood Predictor", layout="wide")
+# ----------------------------
+# GitHub config for Community Reports
+# ----------------------------
+GITHUB_TOKEN = st.secrets["github"]["token"]
+REPO_OWNER = st.secrets["github"]["repo_owner"]
+REPO_NAME = st.secrets["github"]["repo_name"]
 
+JSON_PATH = "reports.json"
+IMAGES_FOLDER = "images"
+
+HEADERS = {
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json"
+}
+
+# Replace with your real admin emails
+AUTHORIZED_ADMINS = ["admin1@example.com", "admin2@example.com"]
+
+# ----------------------------
+# Helper functions for GitHub
+# ----------------------------
+def get_reports():
+    """Fetch reports.json from GitHub"""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{JSON_PATH}"
+    r = requests.get(url, headers=HEADERS)
+    if r.status_code == 200:
+        content = r.json()
+        file_sha = content.get("sha")
+        data = base64.b64decode(content.get("content", "")).decode()
+        if not data.strip():
+            return [], file_sha
+        try:
+            return json.loads(data), file_sha
+        except json.JSONDecodeError:
+            return [], file_sha
+    else:
+        return [], None
+
+def update_reports(new_report):
+    """Upload image + update JSON in GitHub"""
+    # Upload image
+    file_name = f"{IMAGES_FOLDER}/{int(datetime.now().timestamp())}_{new_report['image_file'].name}"
+    file_bytes = new_report['image_file'].getvalue()
+    encoded_image = base64.b64encode(file_bytes).decode()
+    url_upload = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_name}"
+    r = requests.put(url_upload, headers=HEADERS, json={
+        "message": f"Upload image {file_name}",
+        "content": encoded_image
+    })
+    if r.status_code not in [200, 201]:
+        st.error("Failed to upload image to GitHub")
+        st.stop()
+
+    image_url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{file_name}"
+    new_report['image_url'] = image_url
+    del new_report['image_file']
+
+    # Update JSON
+    reports, sha = get_reports()
+    new_report["id"] = max([r.get("id", 0) for r in reports] + [0]) + 1
+    new_report["comments"] = []
+    new_report["timestamp"] = datetime.now().isoformat()
+    reports.append(new_report)
+
+    encoded_json = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
+    url_json = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{JSON_PATH}"
+    r2 = requests.put(url_json, headers=HEADERS, json={
+        "message": "Update reports.json",
+        "content": encoded_json,
+        "sha": sha
+    })
+    if r2.status_code not in [200, 201]:
+        st.error("Failed to update reports.json")
+        st.stop()
+
+# ----------------------------
+# Page Setup
+# ----------------------------
+st.set_page_config(page_title="Weather & Community Dashboard", layout="wide")
+st.title("🌦️ Weather & Community Dashboard")
+
+# ----------------------------
+# Login
+# ----------------------------
 if st.session_state.role is None:
-    st.title("🔐 Login Page")
-
     role_choice = st.radio("Login as:", ["Citizen", "Admin"])
 
     if role_choice == "Citizen":
@@ -158,105 +122,128 @@ if st.session_state.role is None:
                 st.error("❌ Unauthorized email")
 
 else:
-    # ========================
-    # LOGOUT BUTTON
-    # ========================
-    with st.sidebar:
-        st.markdown(f"👤 Logged in as: **{st.session_state.user}** ({st.session_state.role})")
-        if st.button("Logout"):
-            st.session_state.role = None
-            st.session_state.user = None
-            st.rerun()
+    # ----------------------------
+    # Dashboard Navigation
+    # ----------------------------
+    st.sidebar.success(f"Logged in as {st.session_state.role}: {st.session_state.user}")
+    if st.sidebar.button("Logout"):
+        st.session_state.role = None
+        st.session_state.user = None
+        st.rerun()
 
-    # ========================
-    # DASHBOARD SELECTION
-    # ========================
-    dashboard_type = st.sidebar.radio(
-        "Choose Dashboard",
-        ["Citizen Dashboard", "Admin Dashboard", "Community Dashboard"]
-    )
+    dashboard_type = st.sidebar.radio("Select Dashboard", ["Citizen", "Admin", "Community"])
 
+    # ----------------------------
     # Citizen Dashboard
-    if dashboard_type == "Citizen Dashboard" and st.session_state.role == "Citizen":
-        st.header("🌍 Citizen Weather Alerts")
+    # ----------------------------
+    if dashboard_type == "Citizen":
+        st.header("🌍 Citizen Weather Dashboard")
+        st.info("Citizen-specific features (weather, local alerts, etc.) will go here.")
 
-        lat = st.number_input("Enter Latitude", value=19.0760)
-        lon = st.number_input("Enter Longitude", value=72.8777)
-
-        if st.button("Get Forecast"):
-            weather_data = get_weather_data(lat, lon)
-            avg_rain, risk = predict_rainfall(weather_data)
-            st.write(f"📊 Predicted Rainfall: {avg_rain:.2f} mm")
-            st.write(f"⚠️ Flood Risk Level: **{risk}**")
-
-            fmap = generate_map(lat, lon, risk)
-            st_folium(fmap, width=700, height=500)
-
+    # ----------------------------
     # Admin Dashboard
-    elif dashboard_type == "Admin Dashboard" and st.session_state.role == "Admin":
-        st.header("🛠️ Admin Risk Reports")
+    # ----------------------------
+    elif dashboard_type == "Admin":
+        st.header("🛠️ Admin Dashboard")
+        st.info("Admin-specific features (aggregated risks, analytics, etc.) will go here.")
 
-        lat = st.number_input("Enter Latitude", value=19.0760)
-        lon = st.number_input("Enter Longitude", value=72.8777)
-
-        if st.button("Analyze Forecast"):
-            weather_data = get_weather_data(lat, lon)
-            avg_rain, risk = predict_rainfall(weather_data)
-            st.write(f"📊 Predicted Rainfall: {avg_rain:.2f} mm")
-            st.write(f"⚠️ Flood Risk Level: **{risk}**")
-
-            fmap = generate_map(lat, lon, risk)
-            st_folium(fmap, width=700, height=500)
-
+    # ----------------------------
     # Community Dashboard
-    elif dashboard_type == "Community Dashboard":
-        st.header("🌐 Community Weather Reports")
+    # ----------------------------
+    else:
+        st.header("📸 Community Weather Reports")
 
+        st.subheader("Post a New Report")
+        with st.form("report_form"):
+            caption = st.text_area("Add a caption about current weather")
+            uploaded_img = st.file_uploader("Upload an image", type=["jpg","jpeg","png"])
+            submitted = st.form_submit_button("Post Report")
+            if submitted:
+                if not caption or not uploaded_img:
+                    st.error("Please fill all fields and upload an image")
+                else:
+                    new_report = {
+                        "name": st.session_state.user,
+                        "caption": caption.strip(),
+                        "image_file": uploaded_img
+                    }
+                    update_reports(new_report)
+                    st.success("✅ Report posted successfully!")
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("All Community Reports")
         reports, sha = get_reports()
 
-        # Add new report
-        with st.expander("➕ Add New Report"):
-            caption = st.text_area("Caption")
-            image_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
-            if st.button("Submit Report"):
-                if caption and image_file:
-                    img_url = save_image_to_github(image_file, f"images/{image_file.name}")
-                    if img_url:
-                        new_report = {
-                            "user": st.session_state.user,
-                            "role": st.session_state.role,
-                            "caption": caption,
-                            "image": img_url,
-                            "time": datetime.utcnow().isoformat(),
-                            "comments": []
-                        }
-                        reports.append(new_report)
-                        if update_reports(reports, sha):
-                            st.success("✅ Report submitted successfully")
+        if reports:
+            for report in sorted(reports, key=lambda x: x["timestamp"], reverse=True):
+                st.image(report["image_url"], use_container_width=True)
+                st.write(f"**{report['name']}**: {report['caption']}")
+                st.write(f"_Posted at {report['timestamp']}_")
+
+                # Delete post: Admins can delete any, Citizens only their own
+                if st.session_state.role == "Admin" or st.session_state.user == report["name"]:
+                    if st.button("Delete Post", key=f"delpost_{report['id']}"):
+                        reports = [r for r in reports if r["id"] != report["id"]]
+                        encoded_json = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
+                        url_json = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{JSON_PATH}"
+                        r2 = requests.put(url_json, headers=HEADERS, json={
+                            "message": f"Delete report {report['id']}",
+                            "content": encoded_json,
+                            "sha": sha
+                        })
+                        if r2.status_code in [200, 201]:
+                            st.success("✅ Post deleted successfully")
                             st.rerun()
                         else:
-                            st.error("❌ Failed to submit report")
-                else:
-                    st.error("Please add caption and image")
+                            st.error("Failed to delete post")
 
-        # Display reports
-        st.subheader("📋 Community Reports")
-        for idx, r in enumerate(reports):
-            st.markdown(f"**{r['user']} ({r['role']})**: {r['caption']}")
-            if r.get("image"):
-                st.image(r["image"], width=300)
-            st.caption(f"🕒 {r['time']}")
+                # Show comments
+                if report.get("comments"):
+                    st.write("💬 Comments:")
+                    for idx, c in enumerate(report["comments"]):
+                        st.write(f"- {c}")
+                        comment_owner = c.split(":")[0].strip()
+                        if st.session_state.role == "Admin" or st.session_state.user == comment_owner:
+                            if st.button("Delete Comment", key=f"delcomment_{report['id']}_{idx}"):
+                                report["comments"].pop(idx)
+                                encoded_json = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
+                                url_json = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{JSON_PATH}"
+                                r2 = requests.put(url_json, headers=HEADERS, json={
+                                    "message": f"Delete comment {idx} on report {report['id']}",
+                                    "content": encoded_json,
+                                    "sha": sha
+                                })
+                                if r2.status_code in [200, 201]:
+                                    st.success("✅ Comment deleted")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to delete comment")
 
-            # Show comments
-            for c_idx, comment in enumerate(r.get("comments", [])):
-                st.write(f"💬 {comment}")
+                # Add new comment
+                with st.form(f"comment_form_{report['id']}"):
+                    comment_text = st.text_input("Add a comment", key=f"comment_text_{report['id']}")
+                    comment_submitted = st.form_submit_button("Post Comment")
+                    if comment_submitted:
+                        if not comment_text:
+                            st.error("Enter a comment")
+                        else:
+                            report.setdefault("comments", []).append(f"{st.session_state.user}: {comment_text.strip()}")
+                            encoded_json = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
+                            url_json = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{JSON_PATH}"
+                            r2 = requests.put(url_json, headers=HEADERS, json={
+                                "message": f"Add comment on report {report['id']}",
+                                "content": encoded_json,
+                                "sha": sha
+                            })
+                            if r2.status_code in [200, 201]:
+                                st.success("✅ Comment posted")
+                                st.rerun()
+                            else:
+                                st.error("Failed to post comment")
+        else:
+            st.info("No reports yet. Be the first to post!")
 
-            # Add comment
-            new_comment = st.text_input(f"Add comment to report {idx}", key=f"c{idx}")
-            if st.button(f"Submit comment {idx}"):
-                if new_comment:
-                    r["comments"].append(f"{st.session_state.user}: {new_comment}")
-                    if update_reports(reports, sha):
-                        st.rerun()
+
 
 

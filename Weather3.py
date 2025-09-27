@@ -1,120 +1,262 @@
-import requests
 import streamlit as st
+import requests
+import json
+import base64
+from datetime import datetime, timedelta
+from prophet import Prophet
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from prophet import Prophet
-from streamlit_autorefresh import st_autorefresh
-from datetime import datetime, timedelta
-import base64
-import json
 
-# ----------------------------
-# Auto-refresh every 30 mins
-# ----------------------------
-st_autorefresh(interval=30*60*1000, key="auto_refresh")  # 30 minutes
+# ========================
+# GITHUB SETTINGS
+# ========================
+GITHUB_TOKEN = st.secrets["github"]["token"]
+REPO_OWNER = st.secrets["github"]["repo_owner"]
+REPO_NAME = st.secrets["github"]["repo_name"]
+REPORTS_FILE = "reports.json"
 
-# ----------------------------
-# GitHub config for Community Reports
-# ----------------------------
-GITHUB_USER = st.secrets["GITHUB_USER"]
-GITHUB_REPO = st.secrets["GITHUB_REPO"]
-GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
-JSON_PATH = "reports.json"  # path in repo
-IMAGES_FOLDER = "images"
+AUTHORIZED_ADMINS = ["admin1@example.com", "admin2@example.com"]  # <-- change these
 
-HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json"
-}
 
-AUTHORIZED_ADMINS = ["admin1@example.com", "admin2@example.com"]  # <-- change this to your emails
+# ========================
+# GITHUB HELPERS
+# ========================
+def github_headers():
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
 
-# ----------------------------
-# Session state
-# ----------------------------
+
+def get_reports():
+    """Fetch reports.json from GitHub"""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{REPORTS_FILE}"
+    response = requests.get(url, headers=github_headers())
+    if response.status_code == 200:
+        content = response.json()
+        data = base64.b64decode(content["content"]).decode("utf-8")
+        return json.loads(data), content["sha"]
+    return [], None
+
+
+def update_reports(reports, sha):
+    """Update reports.json in GitHub"""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{REPORTS_FILE}"
+    encoded_content = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
+    message = "Update community reports"
+    response = requests.put(url, headers=github_headers(), json={
+        "message": message,
+        "content": encoded_content,
+        "sha": sha
+    })
+    return response.status_code == 200 or response.status_code == 201
+
+
+def save_image_to_github(image_file, filename):
+    """Save uploaded image to GitHub"""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{filename}"
+    file_bytes = image_file.getvalue()
+    encoded_content = base64.b64encode(file_bytes).decode()
+    response = requests.put(url, headers=github_headers(), json={
+        "message": f"Upload {filename}",
+        "content": encoded_content
+    })
+    if response.status_code in (200, 201):
+        return response.json()["content"]["download_url"]
+    return None
+
+
+# ========================
+# WEATHER & FLOOD PREDICTION
+# ========================
+def get_weather_data(lat, lon):
+    """Fetch historical and forecast weather data from Open-Meteo"""
+    now = datetime.utcnow()
+    past = now - timedelta(days=5)
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}"
+        f"&hourly=temperature_2m,precipitation,rain,showers"
+        f"&start_date={past.strftime('%Y-%m-%d')}"
+        f"&end_date={now.strftime('%Y-%m-%d')}"
+    )
+    return requests.get(url).json()
+
+
+def predict_rainfall(weather_data):
+    """Use Prophet to forecast rainfall"""
+    df = pd.DataFrame({
+        "ds": pd.to_datetime(weather_data["hourly"]["time"]),
+        "y": weather_data["hourly"]["rain"]
+    })
+
+    model = Prophet(daily_seasonality=True)
+    model.fit(df)
+
+    future = model.make_future_dataframe(periods=3, freq="H")
+    forecast = model.predict(future)
+
+    avg_rain = forecast["yhat"].iloc[-3:].mean()
+    if avg_rain > 20:
+        risk = "High"
+    elif avg_rain > 10:
+        risk = "Medium"
+    else:
+        risk = "Low"
+
+    return avg_rain, risk
+
+
+def generate_map(lat, lon, risk):
+    """Generate a Folium map with flood risk marker"""
+    fmap = folium.Map(location=[lat, lon], zoom_start=10)
+    color = "red" if risk == "High" else "orange" if risk == "Medium" else "green"
+    folium.Marker(
+        [lat, lon],
+        popup=f"Flood Risk: {risk}",
+        icon=folium.Icon(color=color)
+    ).add_to(fmap)
+    return fmap
+
+
+# ========================
+# LOGIN SYSTEM
+# ========================
 if "role" not in st.session_state:
     st.session_state.role = None
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# ----------------------------
-# Helper functions for GitHub
-# ----------------------------
-def get_reports():
-    """Fetch reports.json from GitHub"""
-    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{JSON_PATH}"
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code == 200:
-        content = r.json()
-        file_sha = content.get("sha")
-        data = base64.b64decode(content.get("content", "")).decode()
-        if not data.strip():
-            return [], file_sha  # empty file, return empty list
-        try:
-            return json.loads(data), file_sha
-        except json.JSONDecodeError:
-            return [], file_sha  # corrupted content, return empty list
-    else:
-        return [], None  # file does not exist yet
+st.set_page_config(page_title="Weather & Flood Predictor", layout="wide")
 
-def update_reports(new_report):
-    # Upload image first
-    file_name = f"{IMAGES_FOLDER}/{int(datetime.now().timestamp())}_{new_report['image_file'].name}"
-    file_bytes = new_report['image_file'].getvalue()
-    encoded_image = base64.b64encode(file_bytes).decode()
-    url_upload = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{file_name}"
-    r = requests.put(url_upload, headers=HEADERS, json={
-        "message": f"Upload image {file_name}",
-        "content": encoded_image
-    })
-    if r.status_code not in [200, 201]:
-        st.error("Failed to upload image to GitHub")
-        st.stop()
-    
-    image_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/{file_name}"
-    new_report['image_url'] = image_url
-    del new_report['image_file']
+if st.session_state.role is None:
+    st.title("🔐 Login Page")
 
-    # Update JSON
-    reports, sha = get_reports()
-    new_report["id"] = max([r.get("id", 0) for r in reports]+[0]) + 1
-    new_report["comments"] = []
-    new_report["timestamp"] = datetime.now().isoformat()
-    reports.append(new_report)
+    role_choice = st.radio("Login as:", ["Citizen", "Admin"])
 
-    encoded_json = base64.b64encode(json.dumps(reports, indent=2).encode()).decode()
-    url_json = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{JSON_PATH}"
-    r2 = requests.put(url_json, headers=HEADERS, json={
-        "message": "Update reports.json",
-        "content": encoded_json,
-        "sha": sha
-    })
-    if r2.status_code not in [200, 201]:
-        st.error("Failed to update reports.json")
-        st.stop()
+    if role_choice == "Citizen":
+        mobile = st.text_input("Enter your mobile number", max_chars=10)
+        if st.button("Login as Citizen"):
+            if mobile.isdigit() and len(mobile) == 10:
+                st.session_state.role = "Citizen"
+                st.session_state.user = mobile
+                st.success("✅ Logged in as Citizen")
+                st.rerun()
+            else:
+                st.error("Please enter a valid 10-digit mobile number")
 
-# ----------------------------
-# Weather & Flood Predictor functions
-# ----------------------------
-def fetch_weather(latitude, longitude):
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&hourly=temperature_2m,rain&timezone=Asia/Kolkata"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except:
-        return None
+    elif role_choice == "Admin":
+        email = st.text_input("Enter your Admin email")
+        if st.button("Login as Admin"):
+            if email in AUTHORIZED_ADMINS:
+                st.session_state.role = "Admin"
+                st.session_state.user = email
+                st.success("✅ Logged in as Admin")
+                st.rerun()
+            else:
+                st.error("❌ Unauthorized email")
 
-def fetch_historical_weather(latitude, longitude, days_back=14):
-    end_date = datetime.utcnow()
-    start_date = end_date - timedelta(days=days_back)
-    delta = timedelta(days=7)
-    all_times, all_rain = [], []
-    current_start = start_date
-    while current_start < end_date:
-        current_end = min(current_start + delta, end_date)
-        url = (f"https
+else:
+    # ========================
+    # LOGOUT BUTTON
+    # ========================
+    with st.sidebar:
+        st.markdown(f"👤 Logged in as: **{st.session_state.user}** ({st.session_state.role})")
+        if st.button("Logout"):
+            st.session_state.role = None
+            st.session_state.user = None
+            st.rerun()
 
+    # ========================
+    # DASHBOARD SELECTION
+    # ========================
+    dashboard_type = st.sidebar.radio(
+        "Choose Dashboard",
+        ["Citizen Dashboard", "Admin Dashboard", "Community Dashboard"]
+    )
+
+    # Citizen Dashboard
+    if dashboard_type == "Citizen Dashboard" and st.session_state.role == "Citizen":
+        st.header("🌍 Citizen Weather Alerts")
+
+        lat = st.number_input("Enter Latitude", value=19.0760)
+        lon = st.number_input("Enter Longitude", value=72.8777)
+
+        if st.button("Get Forecast"):
+            weather_data = get_weather_data(lat, lon)
+            avg_rain, risk = predict_rainfall(weather_data)
+            st.write(f"📊 Predicted Rainfall: {avg_rain:.2f} mm")
+            st.write(f"⚠️ Flood Risk Level: **{risk}**")
+
+            fmap = generate_map(lat, lon, risk)
+            st_folium(fmap, width=700, height=500)
+
+    # Admin Dashboard
+    elif dashboard_type == "Admin Dashboard" and st.session_state.role == "Admin":
+        st.header("🛠️ Admin Risk Reports")
+
+        lat = st.number_input("Enter Latitude", value=19.0760)
+        lon = st.number_input("Enter Longitude", value=72.8777)
+
+        if st.button("Analyze Forecast"):
+            weather_data = get_weather_data(lat, lon)
+            avg_rain, risk = predict_rainfall(weather_data)
+            st.write(f"📊 Predicted Rainfall: {avg_rain:.2f} mm")
+            st.write(f"⚠️ Flood Risk Level: **{risk}**")
+
+            fmap = generate_map(lat, lon, risk)
+            st_folium(fmap, width=700, height=500)
+
+    # Community Dashboard
+    elif dashboard_type == "Community Dashboard":
+        st.header("🌐 Community Weather Reports")
+
+        reports, sha = get_reports()
+
+        # Add new report
+        with st.expander("➕ Add New Report"):
+            caption = st.text_area("Caption")
+            image_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+            if st.button("Submit Report"):
+                if caption and image_file:
+                    img_url = save_image_to_github(image_file, f"images/{image_file.name}")
+                    if img_url:
+                        new_report = {
+                            "user": st.session_state.user,
+                            "role": st.session_state.role,
+                            "caption": caption,
+                            "image": img_url,
+                            "time": datetime.utcnow().isoformat(),
+                            "comments": []
+                        }
+                        reports.append(new_report)
+                        if update_reports(reports, sha):
+                            st.success("✅ Report submitted successfully")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to submit report")
+                else:
+                    st.error("Please add caption and image")
+
+        # Display reports
+        st.subheader("📋 Community Reports")
+        for idx, r in enumerate(reports):
+            st.markdown(f"**{r['user']} ({r['role']})**: {r['caption']}")
+            if r.get("image"):
+                st.image(r["image"], width=300)
+            st.caption(f"🕒 {r['time']}")
+
+            # Show comments
+            for c_idx, comment in enumerate(r.get("comments", [])):
+                st.write(f"💬 {comment}")
+
+            # Add comment
+            new_comment = st.text_input(f"Add comment to report {idx}", key=f"c{idx}")
+            if st.button(f"Submit comment {idx}"):
+                if new_comment:
+                    r["comments"].append(f"{st.session_state.user}: {new_comment}")
+                    if update_reports(reports, sha):
+                        st.rerun()
 
 

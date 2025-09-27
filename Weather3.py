@@ -28,13 +28,10 @@ HEADERS = {
     "Accept": "application/vnd.github+json"
 }
 
-# ----------------------------
-# Authorized Admin Emails
-# ----------------------------
-AUTHORIZED_ADMINS = ["admin1@example.com", "admin2@example.com"]
+AUTHORIZED_ADMINS = ["admin1@example.com", "admin2@example.com"]  # <-- change this to your emails
 
 # ----------------------------
-# Session State
+# Session state
 # ----------------------------
 if "role" not in st.session_state:
     st.session_state.role = None
@@ -53,13 +50,13 @@ def get_reports():
         file_sha = content.get("sha")
         data = base64.b64decode(content.get("content", "")).decode()
         if not data.strip():
-            return [], file_sha  # empty file
+            return [], file_sha  # empty file, return empty list
         try:
             return json.loads(data), file_sha
         except json.JSONDecodeError:
-            return [], file_sha  # corrupted file
+            return [], file_sha  # corrupted content, return empty list
     else:
-        return [], None  # file missing
+        return [], None  # file does not exist yet
 
 def update_reports(new_report):
     # Upload image first
@@ -74,14 +71,14 @@ def update_reports(new_report):
     if r.status_code not in [200, 201]:
         st.error("Failed to upload image to GitHub")
         st.stop()
-
+    
     image_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/{file_name}"
     new_report['image_url'] = image_url
     del new_report['image_file']
 
     # Update JSON
     reports, sha = get_reports()
-    new_report["id"] = max([r.get("id", 0) for r in reports] + [0]) + 1
+    new_report["id"] = max([r.get("id", 0) for r in reports]+[0]) + 1
     new_report["comments"] = []
     new_report["timestamp"] = datetime.now().isoformat()
     reports.append(new_report)
@@ -117,203 +114,7 @@ def fetch_historical_weather(latitude, longitude, days_back=14):
     current_start = start_date
     while current_start < end_date:
         current_end = min(current_start + delta, end_date)
-        url = (f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}"
-               f"&hourly=temperature_2m,rain&start={current_start.strftime('%Y-%m-%dT%H:%M')}"
-               f"&end={current_end.strftime('%Y-%m-%dT%H:%M')}&timezone=Asia/Kolkata")
-        try:
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            all_times.extend(data['hourly']['time'])
-            all_rain.extend(data['hourly']['rain'])
-        except:
-            pass
-        current_start = current_end + timedelta(days=1)
-    return pd.DataFrame({"ds": pd.to_datetime(all_times), "y": all_rain})
+        url = (f"https
 
-def prepare_data_for_prophet(lat, lon):
-    df_hist = fetch_historical_weather(lat, lon, 14)
-    fut_data = fetch_weather(lat, lon)
-    if not fut_data or df_hist is None:
-        return None, None
-    fut_times = fut_data['hourly']['time']
-    fut_rain = fut_data['hourly']['rain']
-    df_combined = pd.concat([df_hist, pd.DataFrame({"ds": pd.to_datetime(fut_times), "y": fut_rain})])
-    return df_combined, fut_times[:3]
-
-def prophet_forecast_with_history(df, hours_ahead=3):
-    if len(df) < 24:
-        return df['y'].tail(hours_ahead).values
-    model = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=False)
-    model.fit(df)
-    future = model.make_future_dataframe(periods=hours_ahead, freq='H')
-    forecast = model.predict(future)
-    return forecast[['yhat']].tail(hours_ahead)['yhat'].clip(lower=0).values
-
-def predict_flood_risk_from_rain(rain_values):
-    total_rain = sum(rain_values)
-    if total_rain > 20:
-        return "High", total_rain, min(100, total_rain*3)
-    elif total_rain > 10:
-        return "Medium", total_rain, min(80, total_rain*2.5)
-    else:
-        return "Low", total_rain, min(50, total_rain*2)
-
-def rain_probability(predicted_rain):
-    total_rain = sum(predicted_rain)
-    if total_rain <= 0.1: return 0
-    elif total_rain < 1: return 30
-    elif total_rain < 5: return 60
-    else: return 90
-
-# ----------------------------
-# Cities
-# ----------------------------
-cities_coords = {
-    "Mumbai": (19.0760, 72.8777),
-    "Delhi": (28.6139, 77.2090),
-    "Bangalore": (12.9716, 77.5946),
-    "Kolkata": (22.5726, 88.3639),
-    "Chhattisgarh": (21.2951,81.8282)
-}
-
-# ----------------------------
-# LOGIN PAGE
-# ----------------------------
-st.set_page_config(page_title="Weather & Flood Predictor + Community", layout="wide")
-
-if not st.session_state.role:
-    st.title("🔐 Login Page")
-    role_choice = st.radio("Login as:", ["Citizen", "Admin"])
-
-    if role_choice == "Citizen":
-        mobile = st.text_input("Enter your mobile number", max_chars=10)
-        if st.button("Login as Citizen"):
-            if mobile.isdigit() and len(mobile) == 10:
-                st.session_state.role = "Citizen"
-                st.session_state.user = mobile
-                st.rerun()   # ✅ replaced
-
-            else:
-                st.error("Please enter a valid 10-digit mobile number")
-
-    elif role_choice == "Admin":
-        email = st.text_input("Enter your Admin email")
-        if st.button("Login as Admin"):
-            if email in AUTHORIZED_ADMINS:
-                st.session_state.role = "Admin"
-                st.session_state.user = email
-                st.rerun()   # ✅ replaced
-            else:
-                st.error("❌ Unauthorized email")
-
-else:
-    # Logout button
-    if st.sidebar.button("Logout"):
-        st.session_state.role = None
-        st.session_state.user = None
-        st.rerun()   # ✅ replaced
-
-    # ----------------------------
-    # Citizen Dashboard
-    # ----------------------------
-    if st.session_state.role == "Citizen":
-        st.title("🌍 Citizen Weather Alerts")
-        city = st.selectbox("Select your city", list(cities_coords.keys()))
-        lat, lon = cities_coords[city]
-
-        df, next_3_times = prepare_data_for_prophet(lat, lon)
-        if df is not None:
-            predicted_rain = prophet_forecast_with_history(df, 3)
-            rain_prob = rain_probability(predicted_rain)
-            risk, _, flood_prob = predict_flood_risk_from_rain(predicted_rain)
-
-            st.subheader(f"Flood Risk in {city}: {risk}")
-            st.write(f"☔ Chance of Rain in next 3 hours: {rain_prob}%")
-            st.write(f"💧 Approximate Flood Probability: {flood_prob:.0f}%")
-            st.write("🕒 Prediction times (local):", ", ".join(next_3_times))
-
-            m = folium.Map(location=[lat, lon], zoom_start=10)
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=20,
-                color="red" if risk=="High" else "orange" if risk=="Medium" else "green",
-                fill=True,
-                fill_color="red" if risk=="High" else "orange" if risk=="Medium" else "green",
-                popup=f"{city}\nRisk: {risk}\nRain Chance: {rain_prob}%\nFlood Prob: {flood_prob:.0f}%"
-            ).add_to(m)
-            st_folium(m, width=700, height=500)
-        else:
-            st.error("Failed to fetch weather data")
-
-        st.markdown("---")
-        st.header("📸 Community Weather Reports")
-        current_user = st.session_state.user
-
-        # Post a new report
-        with st.form("report_form"):
-            caption = st.text_area("Add a caption about current weather")
-            uploaded_img = st.file_uploader("Upload an image", type=["jpg","jpeg","png"])
-            submitted = st.form_submit_button("Post Report")
-            if submitted:
-                if not current_user or not caption or not uploaded_img:
-                    st.error("Please fill all fields and upload an image")
-                else:
-                    new_report = {
-                        "name": current_user.strip(),
-                        "caption": caption.strip(),
-                        "image_file": uploaded_img
-                    }
-                    update_reports(new_report)
-                    st.success("✅ Report posted successfully!")
-                    st.rerun()   # ✅ replaced
-
-        st.markdown("---")
-        st.subheader("All Community Reports")
-        reports, sha = get_reports()
-
-        if reports:
-            for report in sorted(reports, key=lambda x: x["timestamp"], reverse=True):
-                st.image(report["image_url"], use_container_width=True)
-                st.write(f"**{report['name']}**: {report['caption']}")
-                st.write(f"_Posted at {report['timestamp']}_")
-
-    # ----------------------------
-    # Admin Dashboard
-    # ----------------------------
-    elif st.session_state.role == "Admin":
-        st.title("🛠️ Admin Risk Reports")
-        risks = []
-        for city_name, (lat, lon) in cities_coords.items():
-            df, next_3_times = prepare_data_for_prophet(lat, lon)
-            if df is not None:
-                predicted_rain = prophet_forecast_with_history(df, 3)
-                rain_prob = rain_probability(predicted_rain)
-                risk, _, flood_prob = predict_flood_risk_from_rain(predicted_rain)
-            else:
-                risk, rain_prob, flood_prob = "Unknown", 0, 0
-            risks.append({
-                "City": city_name,
-                "Risk": risk,
-                "Rain_%": rain_prob,
-                "Flood_%": flood_prob,
-                "Lat": lat,
-                "Lon": lon,
-                "Next_3_hours": ", ".join(next_3_times) if next_3_times else "N/A"
-            })
-        df_risks = pd.DataFrame(risks)
-        st.dataframe(df_risks[['City','Risk','Rain_%','Flood_%','Next_3_hours']])
-
-        m = folium.Map(location=[20, 78], zoom_start=5)
-        for entry in risks:
-            folium.CircleMarker(
-                location=[entry["Lat"], entry["Lon"]],
-                radius=15,
-                color="red" if entry["Risk"]=="High" else "orange" if entry["Risk"]=="Medium" else "green",
-                fill=True,
-                fill_color="red" if entry["Risk"]=="High" else "orange" if entry["Risk"]=="Medium" else "green",
-                popup=f"{entry['City']}\nRisk: {entry['Risk']}\nRain Chance: {entry['Rain_%']}%\nFlood Prob: {entry['Flood_%']}%"
-            ).add_to(m)
-        st_folium(m, width=700, height=500)
 
 

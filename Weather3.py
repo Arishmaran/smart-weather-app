@@ -192,7 +192,8 @@ if not st.session_state.role:
             if mobile.isdigit() and len(mobile) == 10:
                 st.session_state.role = "Citizen"
                 st.session_state.user = mobile
-                st.experimental_rerun()
+                st.rerun()   # ✅ replaced
+
             else:
                 st.error("Please enter a valid 10-digit mobile number")
 
@@ -202,7 +203,7 @@ if not st.session_state.role:
             if email in AUTHORIZED_ADMINS:
                 st.session_state.role = "Admin"
                 st.session_state.user = email
-                st.experimental_rerun()
+                st.rerun()   # ✅ replaced
             else:
                 st.error("❌ Unauthorized email")
 
@@ -211,7 +212,7 @@ else:
     if st.sidebar.button("Logout"):
         st.session_state.role = None
         st.session_state.user = None
-        st.experimental_rerun()
+        st.rerun()   # ✅ replaced
 
     # ----------------------------
     # Citizen Dashboard
@@ -265,7 +266,7 @@ else:
                     }
                     update_reports(new_report)
                     st.success("✅ Report posted successfully!")
-                    st.experimental_rerun()
+                    st.rerun()   # ✅ replaced
 
         st.markdown("---")
         st.subheader("All Community Reports")
@@ -314,3 +315,5 @@ else:
                 popup=f"{entry['City']}\nRisk: {entry['Risk']}\nRain Chance: {entry['Rain_%']}%\nFlood Prob: {entry['Flood_%']}%"
             ).add_to(m)
         st_folium(m, width=700, height=500)
+
+
